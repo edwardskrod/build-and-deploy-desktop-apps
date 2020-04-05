@@ -1,0 +1,110 @@
+# This workflow will build, test and create app packages for a Wpf project built on Net Core.
+#
+# To configure this workflow:
+#
+# 1.
+#
+# 2.
+#
+# For more information on GitHub Actions, refer to https://github.com/features/actions
+# For a complete CI/CD sample workflow to get started with GitHub Action workflows for Desktop Applications,
+# refer to https://github.com/microsoft/github-actions-for-desktop-apps
+
+name:  Wpf Continuous Integration
+
+# Trigger on every master branch push and pull request
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+jobs:
+
+  build:
+
+    strategy:
+      matrix:
+        configuration: [Debug, Release]
+
+    runs-on: windows-latest
+
+    env:
+      Appx_Bundle: Always                           # Creates an .msixbundle/.appxbundle with the .msix/.appx files for the platform specified.
+      App_Packages_Directory: AppPackages           # The name of the directory that will contain the application packages
+      Appx_Bundle_Platforms: x86|x64                # Include x86 and x64 platforms in the bundle.
+      Appx_Package_Build_Mode: StoreUpload          # Generates the .msixupload/.appxupload file and the _Test folder for sideloading.
+      Signing_Certificate: GitHubActionsDemo.pfx    # The name of the .pfx that will be created and consumed during packaging
+      Solution_Path: MyWpfApp.sln
+      Test_Project_Directory: MyWpfApp.Tests
+      Test_Project_Name: MyWpfApp.Tests.csproj
+      Wpf_Project_Directory: MyWpfApp
+      Wpf_Project_Name: MyWpfApp.csproj
+      Wap_Project_Directory: MyWpfApp.Package
+      Wap_Project_Name: MyWpfApp.Package.wapproj
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+      with:
+        fetch-depth: 0 # avoid shallow clone so nbgv can do its work.
+
+    # Use Nerdbank.GitVersioning to set version variables: https://github.com/AArnott/nbgv
+    - name: Use Nerdbank.GitVersioning to set version variables
+      uses: aarnott/nbgv@v0.3
+      with:
+        setAllVars: true
+
+    # Install the .NET Core workload
+    - name: Install .NET Core
+      uses: actions/setup-dotnet@v1
+      with:
+        dotnet-version: 3.1.100
+
+    # Add  MsBuild to the PATH: https://github.com/microsoft/setup-msbuild
+    - name: Setup MSBuild.exe
+      uses: microsoft/setup-msbuild@v1.0.0
+
+    # Update the version before build
+    - name: Update manifest version
+      run: |
+        [xml]$manifest = get-content ".\$env:Wap_Project_Directory\Package.appxmanifest"
+        $manifest.Package.Identity.Version = "$env:NBGV_SimpleVersion.0"
+        $manifest.save(".\$env:Wap_Project_Directory\Package.appxmanifest")
+
+    # Test
+    - name: Execute Unit Tests
+      run: dotnet test $env:Test_Project_Directory\$env:Test_Project_Name
+
+    # Restore the application
+    - name:  Restore the Wpf application to populate the obj folder with RuntimeIdentifiers
+      run: msbuild $env:Solution_Path /t:Restore /p:Configuration=$env:Configuration
+      env:
+        Configuration: ${{ matrix.configuration }}
+
+    # Decode the Base64 encoded Pfx
+    - name: Decode the Pfx
+      run: |
+        $pfx_cert_byte = [System.Convert]::FromBase64String("${{ secrets.Base64_Encoded_Pfx }}")
+        $currentDirectory = Get-Location
+        $certificatePath = Join-Path -Path $currentDirectory -ChildPath $env:Wap_Project_Directory -AdditionalChildPath $env:Signing_Certificate
+        [IO.File]::WriteAllBytes("$certificatePath", $pfx_cert_byte)
+
+    # Build the Windows Application Packaging project
+    - name: Build the Windows Application Packaging Project (wapproj)
+      run: msbuild $env:Wap_Project_Directory\$env:Wap_Project_Name /p:Configuration=$env:Configuration /p:UapAppxPackageBuildMode=$env:Appx_Package_Build_Mode /p:AppxBundle=$env:Appx_Bundle /p:PackageCertificateKeyFile=$env:Signing_Certificate /p:PackageCertificatePassword=${{ secrets.Pfx_Key }}
+      env:
+        Configuration: ${{ matrix.configuration }}
+
+    # Remove the .pfx
+    - name: Remove the .pfx
+      run: Remove-Item -path $env:Wap_Project_Directory\$env:Signing_Certificate
+
+    # Upload the MSIX package: https://github.com/marketplace/actions/upload-artifact
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v1
+      with:
+        name: MSIX Package
+        path: ${{ env.Wap_Project_Directory }}\${{ env.App_Packages_Directory }}
